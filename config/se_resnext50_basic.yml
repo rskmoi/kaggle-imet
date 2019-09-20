@@ -1,0 +1,13 @@
+data:
+  img_size: 256
+
+model:
+  name: 'se_resnext50'
+  multi: False
+
+train:
+  batch_size: 32
+  num_epochs: 25
+
+path:
+  out: "../result/se_resnext50_pretrained_models"
