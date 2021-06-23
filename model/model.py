@@ -1,6 +1,25 @@
 from pretrainedmodels.models import senet
 import torch
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+from timm import create_model
+
+
+class SwinTransformerWithClassifier(torch.nn.Module):
+    def __init__(self):
+        super(SwinTransformerWithClassifier, self).__init__()
+        self._swin  = create_model(model_name=f'swin_small_patch4_window7_224', pretrained=True)
+        self._swin.head = torch.nn.Identity()
+        self.relu = torch.nn.ReLU()
+        self.dropout = torch.nn.Dropout(0.5)
+        self.linear = torch.nn.Linear(768, 1103)
+
+    def forward(self, x):
+        x = self._swin.forward_features(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.linear(x)
+        return x
+
 
 class SEResnext50WithClassifier(torch.nn.Module):
     def __init__(self):
@@ -60,6 +79,8 @@ def get_model(model_name, pretrained_model_path=None, multi=False):
         model = SEResnext101WithClassifier()
     elif model_name == "senet154":
         model = SEnet154WithClassifier()
+    elif model_name == "swin":
+        model = SwinTransformerWithClassifier()
     else:
         raise ValueError()
 

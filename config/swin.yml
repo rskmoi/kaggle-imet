@@ -1,0 +1,13 @@
+data:
+  img_size: 224
+
+model:
+  name: 'swin'
+  multi: False
+
+train:
+  batch_size: 64
+  num_epochs: 25
+
+path:
+  out: "../result/swin"
