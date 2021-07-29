@@ -24,7 +24,7 @@ class SwinTransformerWithClassifier(torch.nn.Module):
 class SEResnext50WithClassifier(torch.nn.Module):
     def __init__(self):
         super(SEResnext50WithClassifier, self).__init__()
-        self.se_resnext50 = senet.se_resnext50_32x4d(pretrained="imagenet")
+        self.se_resnext50 = senet.se_resnext50_32x4d(pretrained=None)
         self.se_resnext50.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
         self.se_resnext50.last_linear = torch.nn.Linear(512 * 4, 2048)
         self.relu = torch.nn.ReLU()

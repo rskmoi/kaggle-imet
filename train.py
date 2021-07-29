@@ -21,6 +21,15 @@ from torch.utils.data import Dataset, DataLoader
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+#import torch
+#import random
+#torch.manual_seed(1111)
+#torch.cuda.manual_seed(1111)
+#random.seed(1111)
+#np.random.seed(1111)
+#torch.backends.cudnn.enabled = True
+#torch.backends.cudnn.benchmark = True
+
 def mixup(x, y, alpha=0.2):
     lam = np.random.beta(alpha, alpha)
 
@@ -35,7 +44,7 @@ def mixup_loss(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
 
-def train_one_epoch(rank, train_loader, model, optimizer, scheduler, criterion, epoch, out):
+def train_one_epoch_ddp(rank, train_loader, model, optimizer, scheduler, criterion, epoch, out):
     model.train()
     train_pbar = tqdm(train_loader, total=len(train_loader))
     for sample in train_pbar:
@@ -54,18 +63,69 @@ def train_one_epoch(rank, train_loader, model, optimizer, scheduler, criterion, 
     torch.save(model.state_dict(), os.path.join(out, "{}epoch.pth".format(epoch)))
 
 
-def _train(rank, batch_size, img_size, train_csv, model_name, pretrained_model_path, model_multi, lr, num_epochs, out):
-    n_gpu = 1
+def train_one_epoch(train_loader, model, optimizer, scheduler, criterion, epoch, out):
+    model.train()
+    train_pbar = tqdm(train_loader, total=len(train_loader))
+    for sample in train_pbar:
+        images, labels = sample['image'].type(torch.FloatTensor).to(DEVICE), \
+                         sample['y'].type(torch.FloatTensor).to(DEVICE)
+
+        images, labels_a, labels_b, lam = mixup(images, labels)
+        optimizer.zero_grad()
+        logits = model(images)
+        loss = mixup_loss(criterion, logits, labels_a, labels_b, lam)
+        loss.backward()
+        optimizer.step()
+        scheduler.batch_step()
+        train_pbar.set_postfix(loss=loss.data.cpu().numpy(), epoch=epoch)
+
+    torch.save(model.state_dict(), os.path.join(out, "{}epoch.pth".format(epoch)))
+
+
+@click.group()
+def cmd():
+    pass
+
+
+@cmd.command()
+@click.option("--config_path", default="", help="path to config yml file")
+@click.option("-f", is_flag=True, help="Delete output directory if already exists.")
+def train_dp(config_path, f):
+    config = load_config(config_path)
+    make_output_dir(config, f)
+
+    train_loader = ImetDataset(batch_size=config.train.batch_size,
+                               mode="train",
+                               img_size=config.data.img_size,
+                               train_csv=config.data.train_csv).get_loader()
+    #valid_loader = ImetDataset(batch_size=config.eval.batch_size,
+    #                           mode="valid",
+    #                           img_size=config.data.img_size,
+    #                           valid_csv=config.data.valid_csv).get_loader()
+    model = get_model(config.model.name, config.model.pretrained_model_path, config.model.multi)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.train.lr)
+    train_total = len(train_loader.dataset)
+    scheduler = CyclicLRWithRestarts(optimizer, config.train.batch_size, train_total, restart_period=2, t_mult=1.)
+    criterion = FocalLoss()
+
+    for epoch in range(config.train.num_epochs):
+        scheduler.step()
+        train_one_epoch(train_loader, model, optimizer, scheduler, criterion, epoch, config.path.out)
+        # valid_one_epoch(valid_loader, model, epoch)
+
+
+def _train(rank, train_dataset, batch_size, img_size, train_csv, model_name, pretrained_model_path, model_multi, lr, num_epochs, out):
+    n_gpu = 4
     dist.init_process_group("gloo", rank=rank, world_size=n_gpu)
-    train_dataset = ImetDataset(batch_size=batch_size,
-                                mode="train",
-                                img_size=img_size,
-                                train_csv=train_csv).dataset
+    #train_dataset = ImetDataset(batch_size=batch_size,
+    #                            mode="train",
+    #                            img_size=img_size,
+    #                            train_csv=train_csv).dataset
     # valid_dataset = ImetDataset(batch_size=config.eval.batch_size,
     #                             mode="valid",
     #                             img_size=config.data.img_size,
     #                             valid_csv=config.data.valid_csv).dataset
-    model = get_model(model_name, pretrained_model_path, model_multi)
+    model = get_model(model_name, pretrained_model_path, model_multi).to(rank)
     model = DDP(model, device_ids=[rank])
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     sampler = DistributedSampler(train_dataset, num_replicas=n_gpu, rank=rank, shuffle=True)
@@ -81,15 +141,15 @@ def _train(rank, batch_size, img_size, train_csv, model_name, pretrained_model_p
         # valid_one_epoch(valid_loader, model, epoch)
 
 
-@click.command()
+@cmd.command()
 @click.option("--config_path", default="", help="path to config yml file")
 @click.option("-f", is_flag=True, help="Delete output directory if already exists.")
-def train(config_path, f):
+def train_ddp(config_path, f):
     config = load_config(config_path)
     make_output_dir(config, f)
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    print(config)
+
     batch_size = config.train.batch_size
     img_size = config.data.img_size
     train_csv = config.data.train_csv
@@ -99,9 +159,14 @@ def train(config_path, f):
     lr = config.train.lr
     num_epochs = config.train.num_epochs
     out = config.path.out
-
-    mp.spawn(_train, args=(batch_size, img_size, train_csv, model_name, pretrained_model_path, model_multi, lr, num_epochs, out), nprocs=1, join=True)
+    
+    train_dataset = ImetDataset(batch_size=batch_size,
+                                mode="train",
+                                img_size=img_size,
+                                train_csv=train_csv).dataset
+    mp.set_start_method('spawn', force=True)
+    mp.spawn(_train, args=(train_dataset, batch_size, img_size, train_csv, model_name, pretrained_model_path, model_multi, lr, num_epochs, out), nprocs=4, join=True)
 
 
 if __name__ == '__main__':
-    train()
+    cmd()

@@ -3,10 +3,10 @@ data:
 
 model:
   name: 'se_resnext50'
-  multi: False
+  multi: True
 
 train:
-  batch_size: 32
+  batch_size: 128
   num_epochs: 25
 
 path:
